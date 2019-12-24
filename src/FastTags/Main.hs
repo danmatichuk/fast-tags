@@ -86,9 +86,8 @@ options =
         , " Use with qualified_tag.py."
         ]
     , GetOpt.Option [] ["src-prefix"] (GetOpt.ReqArg SrcPrefix "path") $ concat
-        [ "Strip this from the front of module names. This is useful if the"
-        , " source is somewhere below the directory you run the editor in."
-        , " This only has an effect for --fully-qualified."
+        [ "DEPRECATED: This flag has no effect. Module names are now parsed out of"
+        , "source files rather than guessed from file paths."
         ]
     , GetOpt.Option ['R'] [] (GetOpt.NoArg Recurse)
         "read all files under any specified directories recursively"
@@ -154,9 +153,6 @@ main = do
         vim           = not emacs
         trackPrefixes = emacs
         output        = last $ defaultOutput : [fn | Output fn <- flags]
-        -- Put the longest prefixes first, so they don't shadow each other.
-        srcPrefixes   = List.reverse $ List.sortOn Text.length
-            [Text.pack (FilePath.normalise fn) | SrcPrefix fn <- flags]
         defaultOutput = if vim then "tags" else "TAGS"
 
     oldTags <- if vim && NoMerge `notElem` flags
@@ -168,9 +164,9 @@ main = do
         else return [] -- we do not support tags merging for emacs for now
 
     inputs <- if Cabal `elem` flags
-        then map (first (:[])) <$> getCabalInputs inputs
-        else map ((srcPrefixes,) . FilePath.normalise) . Util.unique <$>
-            getInputs flags inputs
+        then getCabalInputs inputs
+        else map FilePath.normalise . Util.unique <$>
+            (getInputs flags inputs)
     when (null inputs) $
         Exit.exitSuccess
 
@@ -180,19 +176,19 @@ main = do
     let tryHsc = Cabal `elem` flags
     stderr <- MVar.newMVar IO.stderr
     newTags <- flip Async.mapConcurrently (zip [0 :: Int ..] inputs) $
-        \(i, (srcPrefixes, fn)) -> Exception.handle (catchError stderr fn) $ do
+        \(i, fn) -> Exception.handle (catchError stderr fn) $ do
             useHsc <- if tryHsc then Directory.doesFileExist (fn ++ "c")
                 else return False
             fn <- return $ if useHsc then fn ++ "c" else fn
-            (newTags, warnings) <- Tag.processFile fn trackPrefixes
+            (mmoduleName, (newTags, warnings)) <- Tag.processFile fn trackPrefixes
             newTags <- return $ if NoModuleTags `elem` flags
                 then filter ((/=Tag.Module) . typeOf) newTags else newTags
-            -- All of the tags from one file should have the same src-prefix,
-            -- so save some work by finding it only once for the whole file.
+
+            -- Asking for the fully-qualified module will fail if it cannot be parsed
+            -- from the file. In this case we produce the simply-qualified variant.
             let qualify fully = map
                     (Tag.qualify fully
-                        (maybe Nothing (Tag.findSrcPrefix srcPrefixes)
-                            (Util.mhead newTags)))
+                        mmoduleName)
                     newTags
             newTags <- return $ (newTags ++) $ if
                 | FullyQualified `elem` flags -> qualify True
@@ -211,7 +207,7 @@ main = do
     when verbose $ putChar '\n'
 
     let allTags = if vim
-            then Vim.merge maxSeparation (map snd inputs) newTags oldTags
+            then Vim.merge maxSeparation inputs newTags oldTags
             else Emacs.format maxSeparation (concat newTags)
     let write = if vim then Text.IO.hPutStrLn else Text.IO.hPutStr
     let withOutput action = if output == "-"
@@ -254,7 +250,7 @@ getInputs flags inputs
     followSymlinks = FollowSymlinks `elem` flags
 
 -- | Parse .cabal files.
-getCabalInputs :: [FilePath] -> IO [(Text.Text, FilePath)]
+getCabalInputs :: [FilePath] -> IO [FilePath]
     -- ^ [(hsSrcDir, modulePath)]
 getCabalInputs fnames = do
     results <- mapM Cabal.parse fnames
@@ -266,7 +262,7 @@ getCabalInputs fnames = do
         let srcDir = FilePath.normalise $
                 FilePath.takeDirectory cabalFname </> hsSrcDir
         mod <- mods
-        return (Text.pack srcDir, srcDir </> mod)
+        return (srcDir </> mod)
 
 -- | Recurse directories collecting all files
 getRecursiveDirContents :: Bool -> [Pattern] -> FilePath -> IO [FilePath]

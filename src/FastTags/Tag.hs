@@ -172,7 +172,7 @@ data ProcessMode
 -- * processFile
 
 -- | Read tags from one file.
-processFile :: FilePath -> Bool -> IO ([Pos TagVal], [String])
+processFile :: FilePath -> Bool -> IO (Maybe Text, ([Pos TagVal], [String]))
 processFile fn trackPrefixes =
     process fn trackPrefixes <$> BS.readFile fn
 
@@ -185,7 +185,7 @@ processFile fn trackPrefixes =
 -- prioritize it for same-file tags, but I think it already does that, so maybe
 -- this isn't necessary?
 qualify :: Bool -> Maybe Text -> Pos TagVal -> Pos TagVal
-qualify fullyQualify srcPrefix (Token.Pos pos (TagVal name typ _)) =
+qualify fullyQualify mmoduleName (Token.Pos pos (TagVal name typ _)) =
     Token.Pos pos TagVal
         { tvName   = qualified
         , tvType   = typ
@@ -196,13 +196,10 @@ qualify fullyQualify srcPrefix (Token.Pos pos (TagVal name typ _)) =
         Module -> module_
         _ -> module_ <> "." <> name
     module_
-        | fullyQualify = T.replace "/" "." $ T.dropWhile (=='/') $
-            maybe id dropPrefix srcPrefix $ T.pack file
+        | fullyQualify
+        , Just moduleName <- mmoduleName = moduleName
         | otherwise = T.pack $ FilePath.takeFileName file
     file = FilePath.dropExtension $ Token.posFile pos
-
-dropPrefix :: Text -> Text -> Text
-dropPrefix prefix txt = maybe txt id $ T.stripPrefix prefix txt
 
 findSrcPrefix :: [Text] -> Pos a -> Maybe Text
 findSrcPrefix prefixes (Token.Pos pos _) =
@@ -210,17 +207,26 @@ findSrcPrefix prefixes (Token.Pos pos _) =
     where file = T.pack $ FilePath.dropExtension $ Token.posFile pos
 
 -- | Process one file's worth of tags.
-process :: FilePath -> Bool -> ByteString -> ([Pos TagVal], [String])
+process :: FilePath -> Bool -> ByteString -> (Maybe Text, ([Pos TagVal], [String]))
 process fn trackPrefixes input =
     case tokenizeInput fn trackPrefixes litMode input of
-        Left msg   -> ([], [T.unpack msg])
-        Right toks -> processTokens procMode toks
+        Left msg   -> (Nothing, ([], [T.unpack msg]))
+        Right toks -> (getModuleName toks, processTokens procMode toks)
     where
     (procMode, litMode) = fromMaybe defaultModes $ determineModes fn
 
 tokenizeInput :: FilePath -> Bool -> LitMode Void -> BS.ByteString -> Either Text [Token]
 tokenizeInput fn trackPrefixes mode =
     Lexer.tokenize fn mode trackPrefixes
+
+getModuleName :: [Token] -> Maybe Text
+getModuleName =
+    go .
+    dropWhile (not . (== KWModule) . valOf)
+    where
+    go ((Pos _ KWModule) : Pos _ (T name) : _) =
+       Just name
+    go _ = Nothing
 
 processTokens :: ProcessMode -> [Token] -> ([Pos TagVal], [String])
 processTokens mode =
